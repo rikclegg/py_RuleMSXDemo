@@ -2,6 +2,7 @@
 
 import logging
 from easymsx.easymsx import EasyMSX
+from easymsx.notification import Notification
 from rulemsx.rulemsx import RuleMSX
 from rulemsx.ruleevaluator import RuleEvaluator
 from rulemsx.action import Action
@@ -49,19 +50,19 @@ class RuleMSXDemo:
             #print("Evaluated StringEqualityEvaluator for DataPoint: " + self.datapoint_name + " of DataSet: " + dataset.name + " - Returning: " + str(dp_value==self.target_value))
             return dp_value==self.target_value
         
-    class ValueChangeEvaluator(RuleEvaluator):
+    class GenericDifferenceEvaluator(RuleEvaluator):
         
-        def __init__(self, datapoint_name, prev_datapoint_name):
+        def __init__(self, datapoint_name1, datapoint_name2):
             
-            self.datapoint_name = datapoint_name
-            self.prev_datapoint_name = prev_datapoint_name
-            super().add_dependent_datapoint_name(datapoint_name)
-            super().add_dependent_datapoint_name(prev_datapoint_name)
+            self.datapoint_name1 = datapoint_name1
+            self.datapoint_name2 = datapoint_name2
+            super().add_dependent_datapoint_name(datapoint_name1)
+            super().add_dependent_datapoint_name(datapoint_name2)
         
         def evaluate(self,dataset):
-            curr_value = dataset.datapoints[self.datapoint_name].get_value()
-            prev_value = dataset.datapoints[self.prev_datapoint_name].get_value()
-            return curr_value!=prev_value
+            dp1_value = dataset.datapoints[self.datapoint_name1].get_value()
+            dp2_value = dataset.datapoints[self.datapoint_name2].get_value()
+            return dp1_value!=dp2_value
 
     class SendMessageWithDataPointValue(Action):
         
@@ -113,25 +114,37 @@ class RuleMSXDemo:
 
     class EMSXFieldDataPointSource(DataPointSource):
 
-        def __init__(self, field):
+        def __init__(self, field, tracker=None):
             #print("Initializing EMSXFieldDataPointSource for field: " + field.name())
             self.source = field
-            self.prev = None
+            self.tracker = tracker
             field.add_notification_handler(self.process_notification)
             
         def get_value(self):
             #print("GetValue of EMSXFieldDataPointSource for field: " + self.source.name())
             return self.source.value()
         
-        def get_prev(self):
-            return self.prev
-        
         def process_notification(self, notification):
-            #print("SetValue of EMSXFieldDataPointSource for field: " + self.source.name())
-            self.prev.set_value(notification.field_changes[0].old_value)
+            print("process_notification of EMSXFieldDataPointSource for field: " + self.source.name())
+            if self.tracker is not None:
+                print("Field has tracker, updating...")
+                self.tracker.track(notification.field_changes[0])
             super().set_stale()
+     
+    class GenericPrevValueDataPointSource(DataPointSource):
+        
+        def __init__(self, initial_value):
+            self.value = initial_value
             
-            
+        def get_value(self):
+            return self.value
+        
+        def track(self, field_change):
+            self.value = field_change.old_value
+            print("Filled old value set to: " + self.value)
+            super().set_stale()
+
+    
     def build_rules(self):
         
         print("Building Rules...")
@@ -148,12 +161,13 @@ class RuleMSXDemo:
         cond_route_status_working = RuleCondition("RouteStatusIsWorking", self.StringEqualityEvaluator("RouteStatus","WORKING"))
         cond_route_status_partfilled = RuleCondition("RouteStatusIsPartFilled", self.StringEqualityEvaluator("RouteStatus","PARTFILL", "Filled"))
         cond_route_status_filled = RuleCondition("RouteStatusIsFilled", self.StringEqualityEvaluator("RouteStatus","FILLED"))
-        
+
         action_route_send_new_message = self.rulemsx.create_action("RouteSendNewMessage", self.SendMessageWithDataPointValue("New Order Created: ", "OrderNumber", "RouteID"))
         action_route_send_ack_message = self.rulemsx.create_action("RouteSendAckMessage", self.SendMessageWithDataPointValue("Broker Acknowledged Route: ", "OrderNumber", "RouteID"))
         action_route_send_partfill_message = self.rulemsx.create_action("RouteSendPartFillMessage", self.ShowRouteFillEvent(self.easymsx))
         action_route_send_fill_message = self.rulemsx.create_action("RouteSendFillMessage", self.ShowRouteFillEvent(self.easymsx))
-
+        #action_route_show_fill = self.rulemsx.create_action("RouteShowFillData", self.ShowRouteFillEvent(self.easymsx))
+        
         demo_order_ruleset = self.rulemsx.create_ruleset("demoOrderRuleSet")
 
         rule_new_order = demo_order_ruleset.add_rule("NewOrder")
@@ -186,18 +200,22 @@ class RuleMSXDemo:
         rule_filled_route.add_rule_condition(cond_route_status_filled)
         rule_filled_route.add_action(action_route_send_fill_message)
 
+        #rule_fill_occurred = demo_route_ruleset.add_rule("FillOccurred")
+        #rule_fill_occurred.add_rule_condition(cond_route_filled_amount_changed)
+        #rule_fill_occurred.add_action(action_route_show_fill)
+        
         print("Rules built.")
 
 
     def process_notification(self,notification):
 
-        if notification.category == EasyMSX.NotificationCategory.ORDER:
-            if notification.type == EasyMSX.NotificationType.NEW or notification.type == EasyMSX.NotificationType.INITIALPAINT: 
+        if notification.category == Notification.NotificationCategory.ORDER:
+            if notification.type == Notification.NotificationType.NEW or notification.type == Notification.NotificationType.INITIALPAINT: 
                 print("EasyMSX Notification ORDER -> NEW/INIT_PAINT: " + notification.source.field("EMSX_SEQUENCE").value())
                 self.parse_order(notification.source)
         
-        if notification.category == EasyMSX.NotificationCategory.ROUTE:
-            if notification.type == EasyMSX.NotificationType.NEW or notification.type == EasyMSX.NotificationType.INITIALPAINT: 
+        if notification.category == Notification.NotificationCategory.ROUTE:
+            if notification.type == Notification.NotificationType.NEW or notification.type == Notification.NotificationType.INITIALPAINT: 
                 print("EasyMSX Notification ROUTE -> NEW/INIT_PAINT: " + notification.source.field("EMSX_SEQUENCE").value() + "/" + notification.source.field("EMSX_ROUTE_ID").value())
                 self.parse_route(notification.source)
             
@@ -225,7 +243,6 @@ class RuleMSXDemo:
         new_dataset.add_datapoint("OrderNumber", self.EMSXFieldDataPointSource(r.field("EMSX_SEQUENCE")))
         new_dataset.add_datapoint("RouteID", self.EMSXFieldDataPointSource(r.field("EMSX_ROUTE_ID")))
         new_dataset.add_datapoint("Filled", self.EMSXFieldDataPointSource(r.field("EMSX_FILLED")))
-        new_dataset.add_datapoint("PrevFilled", self.GenericIntegerDataPointSource(0))
         new_dataset.add_datapoint("Amount", self.EMSXFieldDataPointSource(r.field("EMSX_AMOUNT")))
 
         self.rulemsx.rulesets["demoRouteRuleSet"].execute(new_dataset)
